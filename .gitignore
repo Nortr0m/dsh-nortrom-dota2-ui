@@ -1,0 +1,8 @@
+# 运行时产物，不要提交
+_diag.log
+_cache/
+node_modules/
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

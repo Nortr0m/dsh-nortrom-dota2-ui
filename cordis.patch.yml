@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-nortrom-dota2-ui
+      name: '@local/dsh-nortrom-dota2-ui'
