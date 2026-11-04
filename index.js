@@ -183,6 +183,9 @@ function readPayload(cat, meta) {
 
 /* --------------------------------------------------------- BC3 / YCoCg 解码 */
 
+// 2^(3*idx)，idx 0..15：JS 的 >> 只有 32 位，48 位字段必须用除法取位
+const ALPHA_POW = new Float64Array(16);
+for (let i = 0; i < 16; i++) ALPHA_POW[i] = Math.pow(2, i * 3);
 const RGB565 = new Uint8Array(65536 * 3);
 for (let v = 0; v < 65536; v++) {
   const r = (v >> 11) & 0x1f, g = (v >> 5) & 0x3f, b = v & 0x1f;
@@ -248,24 +251,29 @@ function decodeYCoCg(data, w, h, bstep) {
       }
 
       let sr = 0, sg = 0, sb = 0;
+      // 全尺寸必须按行主序落位：块的 16 个像素横跨 4 行，不能连续写
+      const blkRow = (by << 2) * w;
+      const blkCol = bx << 2;
       for (let py = 0; py < 4; py++) {
+        const rowOff = (blkRow + py * w + blkCol) * 3;
         for (let px = 0; px < 4; px++) {
           const idx = (py << 2) | px;
           const ci = (cbits >> (idx << 1)) & 3;
-          const Y = al[(abits >> (idx * 3)) & 7];
+          const Y = al[(Math.floor(abits / ALPHA_POW[idx])) & 7];
           const Co = cr[ci] - 128, Cg = cg[ci] - 128;
           const t = Y - Cg;
           let r = t + Co, g = Y + Cg, b = t - Co;
           r = r < 0 ? 0 : (r > 255 ? 255 : r);
           g = g < 0 ? 0 : (g > 255 ? 255 : g);
           b = b < 0 ? 0 : (b > 255 ? 255 : b);
-          if (full) { rgb[o] = r; rgb[o + 1] = g; rgb[o + 2] = b; }
+          if (full) { const o2 = rowOff + px * 3; rgb[o2] = r; rgb[o2 + 1] = g; rgb[o2 + 2] = b; }
           else { sr += r; sg += g; sb += b; }
-          if (full) o += 3;
         }
       }
       if (!full) {
         rgb[o] = sr >> 4; rgb[o + 1] = sg >> 4; rgb[o + 2] = sb >> 4; o += 3;
+      } else {
+        o += 48;   // 全尺寸时 o 仅用于游标推进（实际写入用 rowOff）
       }
     }
   }
@@ -628,6 +636,36 @@ export function apply(ctx) {
           matches: store.matches ? store.matches.length : 0, details: Object.keys(store.details).length
         }) + '\n');
       } catch { /* 忽略 */ }
+    } catch { /* 路由冲突 */ }
+
+    // 偏好持久化：DSH 每次启动端口不同，localStorage 按端口隔离会丢，改存磁盘
+    try {
+      const prefsFile = path.join(HERE, '_cache', 'prefs.json');
+      const prefsHandler = (req, res) => {
+        try {
+          if (req.method === 'POST') {
+            let body = '';
+            req.on('data', (c) => { body += c; if (body.length > 65536) { req.destroy(); } });
+            req.on('end', () => {
+              try { JSON.parse(body); mkdirSync(path.dirname(prefsFile), { recursive: true }); writeFileSync(prefsFile, body); } catch { /* 非法 JSON 忽略 */ }
+              try { res.writeHead(204); res.end(); } catch { /* 忽略 */ }
+            });
+            return;
+          }
+          let data = '{}';
+          try { data = readFileSync(prefsFile, 'utf8'); } catch { /* 首次运行 */ }
+          const buf = Buffer.from(data, 'utf8');
+          res.writeHead(200, {
+            'Content-Type': 'application/json; charset=utf-8',
+            'Content-Length': String(buf.length),
+            'Cache-Control': 'no-store'
+          });
+          res.end(buf);
+        } catch { notFound(res); }
+      };
+      for (const kind of ['exact', 'prefix']) {
+        try { disposers.push(webServer.register({ kind, path: '/dota2-ui/prefs', handler: prefsHandler })); } catch { /* 已占用 */ }
+      }
     } catch { /* 路由冲突 */ }
 
     // 诊断通道

@@ -265,13 +265,27 @@ window.__ModuleLoader__.load({
     const SPLASH_KEY = 'dota2-splash-shown';
     const DEFAULT_PREFS = { v: 3, enabled: true, background: 'ancient', boot: 'platinum', bootSound: true, mmrManual: '', panelAlpha: 55, autoTint: true, pureWall: false };
 
+    function migratePrefs(saved) {
+      const out = Object.assign({}, DEFAULT_PREFS, saved);
+      if ((saved.v || 1) < 2) {
+        out.panelAlpha = DEFAULT_PREFS.panelAlpha;
+        out.bootSound = DEFAULT_PREFS.bootSound;
+      }
+      if ((saved.v || 1) < 3) {
+        const bgId = String(out.background || '');
+        const known = bgId.slice(0, 3) === 'ls:' || BACKGROUNDS.some(function (b) { return b.id === bgId; });
+        if (!known) out.background = 'keyart';
+      }
+      out.v = DEFAULT_PREFS.v;
+      return out;
+    }
     let prefs = Object.assign({}, DEFAULT_PREFS);
     try {
       const raw = localStorage.getItem(PREFS_KEY);
       if (raw) {
         const saved = JSON.parse(raw);
         if (saved && typeof saved === 'object') {
-          prefs = Object.assign({}, DEFAULT_PREFS, saved);
+          prefs = migratePrefs(saved);
           if ((saved.v || 1) < 2) {
             // 旧版本存下的面板透明度与声音开关会盖住新默认值，迁移时重置一次
             prefs.panelAlpha = DEFAULT_PREFS.panelAlpha;
@@ -291,11 +305,33 @@ window.__ModuleLoader__.load({
 
     const listeners = new Set();
     function emit() { listeners.forEach(function (fn) { try { fn(prefs); } catch (e) {} }); }
+    function savePrefsToDisk() {
+      try {
+        if (typeof fetch !== 'function') return;
+        fetch('/dota2-ui/prefs', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(prefs)
+        }).catch(function () {});
+      } catch (e) { /* 忽略 */ }
+    }
+    function loadDiskPrefs() {
+      try {
+        if (typeof fetch !== 'function') return;
+        fetch('/dota2-ui/prefs', { cache: 'no-store' }).then(function (r) { return r.json(); })
+          .then(function (d) {
+            if (!d || typeof d !== 'object') return;
+            prefs = migratePrefs(d);
+            try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
+            emit();
+          }).catch(function () { /* Host 不可用就用本地 */ });
+      } catch (e) { /* 忽略 */ }
+    }
     function setPref(key, value) {
       const next = Object.assign({}, prefs);
       next[key] = value;
       prefs = next;
       try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
+      savePrefsToDisk();
       emit();
     }
     function subscribePrefs(fn) { listeners.add(fn); return function () { listeners.delete(fn); }; }
@@ -332,6 +368,10 @@ window.__ModuleLoader__.load({
     /* ---- 配色跟随背景：从壁纸抽主色，整站色系随之切换 ---- */
     let wallTint = null;
     let lastSampledUrl = null;
+    let wallUrlNow = null;
+    let wallImgEl = 'init';
+    // 临时测试：强制固定一张已验证的载入画面，排除选择器与偏好干扰
+    const TEST_WALL = null;
 
     function rgb2hsl(r, g, b) {
       r /= 255; g /= 255; b /= 255;
@@ -418,16 +458,17 @@ window.__ModuleLoader__.load({
       const a = Math.max(40, Math.min(98, typeof panelAlpha === 'number' ? panelAlpha : 78)) / 100;
       const cl = function (v) { return Math.max(0.30, Math.min(0.98, v)); };
       const rgba = function (r, g, b, alpha) { return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha.toFixed(2) + ')'; };
+      const Mb = function (v, d) { return Math.max(0.10, Math.min(0.98, v - d)); };
       const light = photo
-        ? { base: rgba(239,227,204,a), l1: rgba(247,239,221,cl(a+.30)), l2: rgba(231,217,189,cl(a+.38)), side: rgba(230,215,184,cl(a-.05)) }
+        ? { base: rgba(239,227,204,Mb(a,.40)), l1: rgba(247,239,221,cl(a+.10)), l2: rgba(231,217,189,cl(a+.28)), side: rgba(230,215,184,cl(a-.15)) }
         : { base: '#efe3cc', l1: '#f7efdd', l2: '#e7d9bd', side: '#e6d7b8' };
       const useT = !!(tint && prefs.autoTint);
       const c3 = function (rgb, alpha) { return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + alpha.toFixed(2) + ')'; };
       const dark = !photo
         ? { base: '#0d0805', l1: '#241609', l2: '#180e06', side: '#170e06' }
         : useT
-          ? { base: c3(tint.dark, a), l1: c3(tint.layer, cl(a+.30)), l2: c3(tint.mid, cl(a+.38)), side: c3(tint.side, cl(a-.05)) }
-          : { base: rgba(13,8,5,a), l1: rgba(36,22,9,cl(a+.30)), l2: rgba(24,14,6,cl(a+.38)), side: rgba(23,14,6,cl(a-.05)) };
+          ? { base: c3(tint.dark, Mb(a,.40)), l1: c3(tint.layer, cl(a+.10)), l2: c3(tint.mid, cl(a+.28)), side: c3(tint.side, cl(a-.15)) }
+          : { base: rgba(13,8,5,Mb(a,.40)), l1: rgba(36,22,9,cl(a+.10)), l2: rgba(24,14,6,cl(a+.28)), side: rgba(23,14,6,cl(a-.15)) };
       const acc = useT ? 'rgb(' + tint.accent.join(',') + ')' : 'var(--d2-gold, #c9a55c)';
       const accHi = useT ? 'rgb(' + tint.accentHi.join(',') + ')' : 'var(--d2-gold-hi, #f0c070)';
       const bd1 = useT ? 'rgba(' + tint.accentDim.join(',') + ',.75)' : '#3d2a17';
@@ -583,7 +624,7 @@ window.__ModuleLoader__.load({
       /* 设置页 */
       'html.d2-pure .d2-atmos-band, html.d2-pure .d2-atmos-vig { display: none !important; }',
       'html.d2-pure .d2-page { background: transparent !important; border-color: rgb(var(--d2-gold-rgb, 201 165 92) / .25) !important; }',
-      '.d2-page { display: flex; flex-direction: column; gap: 22px; padding: 18px 20px 26px; max-width: 820px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l1, #3d2a17); background: var(--dsw-alias-bg-layer-2, #180e06); }',
+      '.d2-page { display: flex; flex-direction: column; gap: 22px; padding: 18px 20px 26px; max-width: 820px; border-radius: 10px; border: 1px solid var(--dsw-alias-border-l1, #3d2a17); background: var(--d2-solid, rgba(16,11,6,.94)); }',
       '.d2-sec { display: flex; flex-direction: column; gap: 10px; }',
       '.d2-sec-title { font-size: 13px; font-weight: 700; letter-spacing: .5px; }',
       '.d2-sec-desc { font-size: 11px; opacity: .62; line-height: 1.65; }',
@@ -973,7 +1014,7 @@ function PlayerCard() {
 
     /* 背景层：只渲染一个 <style>，随选择切换 body 底图 */
     function backdropCss() {
-      return 'html,body{background-color:#0d0805;background-image:var(--d2-wall,none);color-scheme:dark;' +
+      return 'html,body{background-color:#0d0805;background-image:none;color-scheme:dark;' +
         'background-size:cover;background-position:center;background-repeat:no-repeat;}' +
         '#root,#app,#__dsh_app{background-color:transparent !important;}';
     }
@@ -1439,6 +1480,7 @@ function BackgroundPicker() {
           try {
             const el = document.documentElement.style;
             const t = (prefs.autoTint && wallTint) ? wallTint : null;
+            el.setProperty('--d2-solid', t ? ('rgba(' + t.dark.join(',') + ',.94)') : 'rgba(16,11,6,.94)');
             el.setProperty('--d2-gold', t ? ('rgb(' + t.accent.join(',') + ')') : 'var(--d2-gold, #c9a55c)');
             el.setProperty('--d2-gold-hi', t ? ('rgb(' + t.accentHi.join(',') + ')') : 'var(--d2-gold-hi, #f0c070)');
             el.setProperty('--d2-gold-rgb', t ? t.accent.join(' ') : '201 165 92');
@@ -1455,16 +1497,49 @@ function BackgroundPicker() {
           if (prefs.enabled) {
             const url = wallFor(prefs.background);
             try { document.documentElement.classList.toggle('d2-pure', !!prefs.pureWall); } catch (e) {}
-            if (url && url !== lastSampledUrl) { lastSampledUrl = url; sampleWall(url); }
+            if (url && url !== lastSampledUrl) { lastSampledUrl = url; wallUrlNow = url || null; sampleWall(url); probeWall(url); }
             wall = url
               ? (prefs.pureWall
                   ? 'url("' + url + '")'
-                  : 'linear-gradient(180deg, rgba(13,8,5,.40) 0%, rgba(13,8,5,.26) 45%, rgba(13,8,5,.58) 100%), url("' + url + '")')
+                  : 'linear-gradient(180deg, rgba(13,8,5,.30) 0%, rgba(13,8,5,.16) 45%, rgba(13,8,5,.44) 100%), url("' + url + '")')
               : 'radial-gradient(ellipse 60% 45% at 18% 8%, rgb(var(--d2-gold-rgb, 201 165 92) / .10) 0%, rgb(var(--d2-gold-rgb, 201 165 92) / 0) 60%), radial-gradient(ellipse 55% 50% at 84% 92%, rgba(139,26,26,.13) 0%, rgba(139,26,26,0) 62%), radial-gradient(ellipse 70% 60% at 50% 50%, rgba(58,36,20,.55) 0%, rgba(13,8,5,0) 75%)';
           }
           try {
             if (wall) document.documentElement.style.setProperty('--d2-wall', wall);
             else document.documentElement.style.removeProperty('--d2-wall');
+            // 把壁纸直接贴到应用自己的根容器（它一定会被绘制）：手段不靠 CSS 堆叠层级
+            try {
+              const old = document.getElementById('d2-wallpaper');
+              if (old && old.parentNode) old.parentNode.removeChild(old);
+              const dim = prefs.pureWall ? 0 : 0.18;   // 轻抹素：可读性由面板层保证，不再 45% 压死图案
+              const scrim = 'rgba(13,8,5,' + dim.toFixed(2) + ')';
+              const vw = window.innerWidth, vh = window.innerHeight;
+              const frames = document.querySelectorAll('div[class*="_frame"], div[class*="frame"]');
+              let applied = 0;
+              for (let i = 0; i < frames.length; i++) {
+                const f = frames[i];
+                const r = f.getBoundingClientRect();
+                // 只认“窗口尺寸”的那一层：排除 2273x10009 这类会话滚动容器
+                const isViewport = Math.abs(r.width - vw) <= 6 && Math.abs(r.height - vh) <= 12;
+                if (!wallUrlNow || !isViewport) {
+                  f.style.removeProperty('background-image');
+                  f.style.removeProperty('background-size');
+                  f.style.removeProperty('background-position');
+                  f.style.removeProperty('background-repeat');
+                  f.style.removeProperty('background-attachment');
+                  continue;
+                }
+                const src = TEST_WALL ? lsImage(TEST_WALL) : wallUrlNow;
+                f.style.setProperty('background-image',
+                  'linear-gradient(' + scrim + ',' + scrim + '), url("' + src + '")', 'important');
+                f.style.setProperty('background-size', 'cover', 'important');
+                f.style.setProperty('background-position', 'center', 'important');
+                f.style.setProperty('background-repeat', 'no-repeat', 'important');
+                applied++;
+              }
+wallImgEl = 'frames:' + applied + ' dim:' + dim.toFixed(2)
+                + ' src:' + (TEST_WALL ? lsImage(TEST_WALL) : (wallUrlNow || 'none'));
+            } catch (e) { wallImgEl = 'err:' + (e && e.message ? e.message.slice(0, 48) : ''); }
           } catch (e) {}
         }
 
@@ -1499,28 +1574,50 @@ function BackgroundPicker() {
         reg('conversation.composer.dock', { id: 'dota2-runes', order: 2 }, DockRunesG, 'composer.dock');
         reg('settings.section', { id: 'dota2-theme', order: 60, label: 'DOTA2 主题' }, SettingsPage, 'settings.section');
 
+        const wallProbe = { ok: null, w: 0, h: 0 };
+        function probeWall(url) {
+          if (!url || typeof Image !== 'function') return;
+          const im = new Image();
+          im.onload = function () { wallProbe.ok = true; wallProbe.w = im.naturalWidth; wallProbe.h = im.naturalHeight; };
+          im.onerror = function () { wallProbe.ok = false; };
+          im.src = url;
+        }
+        function probePaint() {
+          try {
+            const cs1 = getComputedStyle(document.documentElement);
+            const cs2 = getComputedStyle(document.body);
+            wallProbe.htmlBg = String(cs1.backgroundImage).slice(0, 220);
+            wallProbe.bodyBg = String(cs2.backgroundImage).slice(0, 220);
+            const w = window.innerWidth, h = window.innerHeight;
+            const el = document.elementFromPoint(Math.floor(w / 2), Math.floor(h / 2));
+            wallProbe.topEl = el ? (el.tagName + '|' + String(el.className || '').slice(0, 48)
+              + '|bg=' + String(getComputedStyle(el).backgroundColor).slice(0, 34)) : null;
+          } catch (e) { /* 忽略 */ }
+        }
         function domScan() {
+          // 全深度扫描：列出所有“大面积 + 不透明(α≥0.8)或带背景图”的层，用于找出遮住壁纸的那一层
           const out = [];
-          function walk(el, depth) {
-            if (!el || depth > 4 || out.length >= 22) return;
-            let bg = '';
-            try { bg = getComputedStyle(el).backgroundColor; } catch (e) {}
-            let alpha = 0;
-            const m = /rgba?\(([^)]+)\)/.exec(bg || '');
-            if (m) {
-              const parts = m[1].split(',').map(function (t) { return t.trim(); });
-              alpha = parts.length > 3 ? parseFloat(parts[3]) : 1;
+          try {
+            const all = document.querySelectorAll('*');
+            for (let i = 0; i < all.length && out.length < 26; i++) {
+              const el = all[i];
+              const cs = getComputedStyle(el);
+              const bg = cs.backgroundColor || '';
+              let a = 0;
+              const m = /rgba?\(([^)]+)\)/.exec(bg);
+              if (m) {
+                const parts = m[1].split(',').map(function (x) { return parseFloat(x); });
+                a = parts.length > 3 ? parts[3] : 1;
+              }
+              const img = cs.backgroundImage && cs.backgroundImage !== 'none';
+              if (a < 0.8 && !img) continue;
+              const r = el.getBoundingClientRect();
+              if (r.width * r.height < 60000) continue;
+              out.push((el.tagName + '.' + String(el.className || '').split(' ')[0]).slice(0, 46)
+                + ' a=' + a.toFixed(2) + ' ' + Math.round(r.width) + 'x' + Math.round(r.height)
+                + (img ? ' IMG(' + String(cs.backgroundImage).slice(0, 26) + ')' : ''));
             }
-            if (bg && bg !== 'transparent' && alpha > 0.05) {
-              const id = el.id ? '#' + el.id : '';
-              const cls = (typeof el.className === 'string' && el.className) ? '.' + el.className.trim().split(/\s+/).slice(0, 2).join('.') : '';
-              let box = '';
-              try { const r = el.getBoundingClientRect(); box = Math.round(r.width) + 'x' + Math.round(r.height); } catch (e) {}
-              out.push(el.tagName.toLowerCase() + id + cls + ' bg=' + bg + ' ' + box);
-            }
-            for (let i = 0; i < el.children.length; i++) walk(el.children[i], depth + 1);
-          }
-          try { walk(document.body, 0); } catch (e) {}
+          } catch (e) { out.push('err:' + (e && e.message ? e.message.slice(0, 44) : '')); }
           return out;
         }
 
@@ -1535,15 +1632,19 @@ function BackgroundPicker() {
             } catch (e) { tok = 'err:' + e.message; }
             let bodyBg = '';
             try { bodyBg = getComputedStyle(document.body).backgroundImage || ''; } catch (e) {}
+        try { probePaint(); } catch (e) { /* 忽略 */ }
             const payload = {
               tag: tag, themeOk: typeof theme.overrideTokens === 'function',
               bgBase: String(tok), revision: rev, prefs: prefs,
-              bodyBg: String(bodyBg).slice(0, 100), dom: domScan(), errors: errors.slice(0, 8)
+              bodyBg: String(bodyBg).slice(0, 160), dom: domScan(), errors: errors.slice(0, 8),
+              wallUrl: wallUrlNow, wallLoaded: wallProbe.ok, wallW: wallProbe.w, wallH: wallProbe.h, wallImgEl: wallImgEl,
+              htmlBg: wallProbe.htmlBg, bodyBg2: wallProbe.bodyBg, topEl: wallProbe.topEl
             };
             if (typeof fetch === 'function') fetch('/dota2-ui/diag?' + encodeURIComponent(JSON.stringify(payload))).catch(function () {});
           } catch (e) {}
         }
         sendDiag('apply');
+        loadDiskPrefs();
         try {
           window.addEventListener('error', function (ev) {
             try { sendDiag('winerror:' + String(ev && ev.message ? ev.message : '?').slice(0, 110)); } catch (e) {}
