@@ -263,7 +263,7 @@ window.__ModuleLoader__.load({
        ------------------------------------------------------------------ */
     const PREFS_KEY = 'dota2-ancient-ui';
     const SPLASH_KEY = 'dota2-splash-shown';
-    const DEFAULT_PREFS = { v: 3, enabled: true, background: 'ancient', boot: 'platinum', bootSound: true, mmrManual: '', panelAlpha: 55, autoTint: true, pureWall: false };
+    const DEFAULT_PREFS = { v: 3, enabled: true, background: 'ancient', boot: 'intro', bootSound: true, mmrManual: '', panelAlpha: 55, autoTint: true, pureWall: false };
 
     function migratePrefs(saved) {
       const out = Object.assign({}, DEFAULT_PREFS, saved);
@@ -319,10 +319,17 @@ window.__ModuleLoader__.load({
         if (typeof fetch !== 'function') return;
         fetch('/dota2-ui/prefs', { cache: 'no-store' }).then(function (r) { return r.json(); })
           .then(function (d) {
-            if (!d || typeof d !== 'object') return;
-            prefs = migratePrefs(d);
-            try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
-            emit();
+            // 只接受真正含我们键的磁盘偏好；'{}'（文件不存在）绝不能覆盖 localStorage 已恢复的偏好
+            const real = d && typeof d === 'object' &&
+              ('background' in d || 'enabled' in d || 'boot' in d || 'panelAlpha' in d);
+            if (real) {
+              prefs = migratePrefs(d);
+              try { localStorage.setItem(PREFS_KEY, JSON.stringify(prefs)); } catch (e) {}
+              emit();
+            } else {
+              // 磁盘还没有内容：用当前（localStorage 恢复的）偏好播种，避免下次重启又丢
+              savePrefsToDisk();
+            }
           }).catch(function () { /* Host 不可用就用本地 */ });
       } catch (e) { /* 忽略 */ }
     }
@@ -1082,11 +1089,6 @@ function PlayerCard() {
       const boot = bootById(p.boot);
       const videoMode = boot.kind === 'video' && !videoFailed;
 
-      React.useEffect(function () {
-        if (phase !== 'idle' || boot.kind !== 'platinum') return undefined;
-        const t = setTimeout(function () { setPhase('out'); }, 3900);
-        return function () { clearTimeout(t); };
-      }, [phase, boot.id]);
       function gesture() {
         const el = videoRef.current;
         if (soundBlocked && el) {
